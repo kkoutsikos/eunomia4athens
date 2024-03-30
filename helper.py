@@ -17,7 +17,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Define the path for generated embeddings
 DB_FAISS_PATH = 'vectorstore/db_faiss'
-OPENAI_API_KEY ="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"
+
 
 # Load the model of choice
 def load_llm():
