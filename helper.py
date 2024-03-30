@@ -1,9 +1,8 @@
 import streamlit as st
 from streamlit_chat import message
-import os,tempfile
-from pathlib import Path
-from langchain.document_loaders import TextLoader
-from langchain.embeddings import OpenAIEmbeddings
+import tempfile
+
+
 from langchain.vectorstores import FAISS
 from langchain.chat_models import ChatOpenAI
 from langchain.chains import RetrievalQA
@@ -11,47 +10,60 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.llms import OpenAI
 from langchain.chains import RetrievalQA
-from langchain.document_loaders import PyPDFLoader, DirectoryLoader
+from langchain.document_loaders import PyPDFLoader
 from langchain.retrievers import BM25Retriever, EnsembleRetriever
 from langchain import PromptTemplate
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.llms.openai import OpenAIChat
+
 # Define the path for generated embeddings
-TMP_DIR = Path(__file__).resolve().parent.joinpath('data', 'tmp')
-LOCAL_VECTOR_STORE_DIR = Path(__file__).resolve().parent.joinpath('data', 'vector_store')
+DB_FAISS_PATH = 'vectorstore/db_faiss'
+OPENAI_API_KEY ="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"
+
+# Load the model of choice
+def load_llm():
+    llm = ChatOpenAI(
+        openai_api_key = st.secrets.openai_api_key,
+        model="gpt-4",
+        temperature=0.1,
+    )
+    return llm
 
 
-
-# Set the title for the Streamlit app
 st.title("Δημοτικος Βοηθος")
 
+uploaded_file = st.sidebar.file_uploader("Upload File", type="pdf")
 
 
-def load_documents():
-    loader = DirectoryLoader(TMP_DIR.as_posix(), glob='**/*.pdf')
-    documents = loader.load()
-    return documents
+if uploaded_file:
+    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        tmp_file.write(uploaded_file.getvalue())
+        tmp_file_path = tmp_file.name
 
-
-def split_documents(documents):
+    # Load CSV data using CSVLoader
+    loader = PyPDFLoader(file_path=tmp_file_path)
+    data = loader.load()
+    #Split documents
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=10)
-    texts = text_splitter.split_documents(documents)
-    return texts
-
-
-def embeddings_on_local_vectordb(texts):
+    texts = text_splitter.split_documents(data)
+    # Create embeddings using Sentence Transformers
     embeddings = HuggingFaceEmbeddings(model_name='lighteternal/stsb-xlm-r-greek-transfer')
-    vectordb = FAISS.from_documents(texts, embedding=embeddings,
-                                     persist_directory=LOCAL_VECTOR_STORE_DIR.as_posix())
-    vectordb.persist()
+
     
+    
+    # Create a FAISS vector store and save embeddings
+    db = FAISS.from_documents(texts, embeddings)
+    db.save_local(DB_FAISS_PATH)
+
+    # Load the language model
+    llm = load_llm()
+    # Create retriever
     bm25_retriever = BM25Retriever.from_documents(texts)
     bm25_retriever.k = 4
-    faiss_retriever = vectordb.as_retriever(search_kwargs={"k":4})
-    retriever = EnsembleRetriever(retrievers=[bm25_retriever, faiss_retriever], weights=[0.5, 0.75])
-    return retriever
-
-def query_llm(retriever, query):
+    faiss_retriever = db.as_retriever(search_kwargs={"k":4})
+    ensemble_retriever = EnsembleRetriever(retrievers=[bm25_retriever, faiss_retriever], weights=[0.5, 0.75])
+    
+    # Create Prompt 
+    
     prompt_template = """""Θα σου δώσω συγκεκριμένες πληροφορίες [ΠΛΗΡΟΦΟΡΙΕΣ] και μια 
                         ερώτηση [ΕΡΩΤΗΣΗ]. Βάσει των πληροφοριών αυτών, θέλω μια αναλυτική και ακριβή απάντηση [ΑΠΑΝΤΗΣΗ]. Απαντάς σε έναν απλό πολίτη σαν εκπρόσωπος του Δήμου του. Εάν δεν διαθέτεις 
                         αρκετές πληροφορίες για μια συγκεκριμένη απάντηση, χρησιμοποίησε τη φράση: 'Δυστυχώς δεν έχω τις απαραίτητες 
@@ -62,76 +74,44 @@ def query_llm(retriever, query):
                         """
 
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    # Create a conversational chain
-    llm = ChatOpenAI(temperature=0.5, model='gpt-4', openai_api_key = st.secrets.openai_api_key)
-    chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever, chain_type_kwargs={"prompt" : prompt, "verbose": True}) 
+    
+    chain = ConversationalRetrievalChain.from_llm(llm=llm, retriever=ensemble_retriever)
 
+    
+    def conversational_chat(query):
+        result = chain({"question": query, "chat_history": st.session_state['history']})
+        st.session_state['history'].append((query, result["answer"]))
+        return result["answer"]
 
-    result = chain.run({'question': query, 'chat_history': st.session_state.messages})
     
-    
-    
-    
-    result = result['answer']
-    st.session_state.messages.append((query, result))
-    return result
-# Create a file uploader in the sidebar
+    if 'history' not in st.session_state:
+        st.session_state['history'] = []
 
-def input_fields():
-    #
-    with st.sidebar:
-        #
-        if "openai_api_key" in st.secrets:
-            st.session_state.openai_api_key = st.secrets.openai_api_key
-        else:
-            st.session_state.openai_api_key = st.text_input("OpenAI API key", type="password")
-        
     
-    st.session_state.source_docs = st.file_uploader(label="Upload Documents", type="pdf", accept_multiple_files=True)
-    
-# Handle file upload
-def process_documents():
-    if not st.session_state.openai_api_key or not st.session_state.source_docs:
-        st.warning(f"Please upload the documents and provide the missing fields.")
-    else:
-        try:
-            for source_doc in st.session_state.source_docs:
-                #
-                with tempfile.NamedTemporaryFile(delete=False, dir=TMP_DIR.as_posix(), suffix='.pdf') as tmp_file:
-                    tmp_file.write(source_doc.read())
-                #
-                documents = load_documents()
-                #
-                for _file in TMP_DIR.iterdir():
-                    temp_file = TMP_DIR.joinpath(_file)
-                    temp_file.unlink()
-                #
-                texts = split_documents(documents)
-                #
-                
-                st.session_state.retriever = embeddings_on_local_vectordb(texts)
-                
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
-            
-def boot():
-    #
-    input_fields()
-    #
-    st.button("Ανεβαστε αρχεια", on_click=process_documents)
-    #
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    #
-    for message in st.session_state.messages:
-        st.chat_message('πολιτης').write(message[0])
-        st.chat_message('βοηθος').write(message[1])    
-    #
-    if query := st.chat_input():
-        st.chat_message("πολιτης").write(query)
-        response = query_llm(st.session_state.retriever, query)
-        st.chat_message("βοηθος").write(response)
+    if 'generated' not in st.session_state:
+        st.session_state['generated'] = ["Καλημέρα, πως μπορώ να βοηθήσω?"]
 
-if __name__ == '__main__':
-    #
-    boot()            
+    if 'past' not in st.session_state:
+        st.session_state['past'] = ["Hey ! 👋"]
+
+    
+    response_container = st.container()
+    container = st.container()
+
+    
+    with container:
+        with st.form(key='my_form', clear_on_submit=True):
+            user_input = st.text_input("Query:", placeholder="Ερώτηση στον βοηθό", key='input')
+            submit_button = st.form_submit_button(label='Send')
+
+        if submit_button and user_input:
+            output = conversational_chat(user_input)
+            st.session_state['past'].append(user_input)
+            st.session_state['generated'].append(output)
+
+    
+    if st.session_state['generated']:
+        with response_container:
+            for i in range(len(st.session_state['generated'])):
+                message(st.session_state["past"][i], is_user=True, key=str(i) + '_user', avatar_style="big-smile")
+                message(st.session_state["generated"][i], key=str(i), avatar_style="thumbs")
