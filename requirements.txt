@@ -7,3 +7,4 @@ langchain-pinecone==0.0.2
 langchainhub==0.1.14
 pypdf
 sentence-transformers
+faiss-cpu
