@@ -58,7 +58,7 @@ chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever= ense
 
 
 
-st.title("Δημοτικός βοηθός")
+
 
 user_input = st.text_input("Ρωτήστε τον βοηθό", "")
 
